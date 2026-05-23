@@ -1,26 +1,41 @@
+#!/bin/bash
+# configuration file for AWS infrastructure setup
+CONFIG_FILE="config.json"
+
 # credentials for AWS CLI
-#export AWS_ACCESS_KEY_ID="your_access_key_id"
-#export AWS_SECRET_ACCESS_KEY="your_secret_access_key"
-#export AWS_DEFAULT_REGION="us-east-1"
+export AWS_ACCESS_KEY_ID="$(cat "$CONFIG_FILE" | jq -r '.global .aws_access_key')"
+export AWS_SECRET_ACCESS_KEY="$(cat "$CONFIG_FILE" | jq -r '.global .aws_secret_key')"
+export AWS_DEFAULT_REGION="$(cat "$CONFIG_FILE" | jq -r '.global .region')"
 
 # global variables
-PROJECT_NAME="aws-http-cicd"
+PROJECT_NAME="$(cat "$CONFIG_FILE" | jq -r '.global .project_name')"
 
 # VPC configuration variables
-VPC_CIDR="172.25.1.0/24"
+VPC_CIDR="$(cat "$CONFIG_FILE" | jq -r '.vpc .cidr_block')"
 VPC_NAME="$PROJECT_NAME-vpc"
-SUBNET_CIDR="172.25.1.0/26"
+SUBNET_CIDR="$(cat "$CONFIG_FILE" | jq -r '.vpc .subnet_cidr_block')"
 SUBNET_NAME="$PROJECT_NAME-subnet"
 AVAILABILITY_ZONE="$(aws ec2 describe-availability-zones \
 | jq -r '.[] .[] .ZoneName' | head -1)"
 IGW_NAME="$PROJECT_NAME-igw"
 RT_NAME="$PROJECT_NAME-rt"
-DESTINATION_CIDR="0.0.0.0/0"
+DESTINATION_CIDR="$(cat "$CONFIG_FILE" | jq -r '.vpc .destination_cidr_block')"
 
 # security group configuration variables
 SG_NAME="$PROJECT_NAME-sg"
 SG_DESCRIPTION="Security group for $PROJECT_NAME"
 ports=(22 80 443)
+KEY_NAME="$PROJECT_NAME-key"
+KEY_FILE="$KEY_NAME.pem"
+
+# EC2 instance configuration variables
+AMI_ID="$(cat "$CONFIG_FILE" | jq -r '.ec2 .ami_id')"
+INSTANCE_TYPE="$(cat "$CONFIG_FILE" | jq -r '.ec2 .instance_type')"
+INSTANCE_NAME="$PROJECT_NAME-instance"
+INSTANCE_COUNT=$(cat "$CONFIG_FILE" | jq -r '.ec2 .instance_count')
+PROVISION_SCRIPT_FILE="src/provision_script.sh"
+GIT_SCRIPT_FILE="src/git_config.sh"
+GIT_PRIVATE_KEY_FILE="$(cat "$CONFIG_FILE" | jq -r '.git_repo .private_key_file')"
 
 # checking if AWS CLI is installed
 aws_checker(){
@@ -99,18 +114,53 @@ create_sg(){
         --port "$port" --cidr $DESTINATION_CIDR >> /dev/null
         echo "Ingress rule added for port $port"
     done
+    aws ec2 create-key-pair --key-name "$KEY_NAME" --query 'KeyMaterial' --output text > "$KEY_FILE"
+    chmod 400 "$KEY_FILE"
+    echo "Key pair created with name: $KEY_NAME and saved to $KEY_FILE"
+}
+
+create_vm(){
+    local provision_script=$(<"$PROVISION_SCRIPT_FILE")
+    echo "Creating a new EC2 instance..."
+    INSTANCE_ID=$(aws ec2 run-instances \
+    --image-id $AMI_ID \
+    --count $INSTANCE_COUNT \
+    --instance-type $INSTANCE_TYPE \
+    --key-name $KEY_NAME \
+    --security-group-ids $SG_ID \
+    --subnet-id $SUBNET_ID \
+    --associate-public-ip-address \
+    --user-data "$provision_script" \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$INSTANCE_NAME}]" \
+    | jq -r '.Instances[] .InstanceId')
+    echo "EC2 instance created with ID: $INSTANCE_ID"
+    echo "Waiting for the instance to be in 'running' state..."
+    aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+    echo "Instance is running. Fetching public IP address..."
+    PUBLIC_IP=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+    | jq -r '.Reservations[] .Instances[] .PublicIpAddress')
+    echo "Instance Public IP: $PUBLIC_IP"
 }
 
 cleanup(){
     echo "Cleaning up resources..."
+    aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --force --skip-os-shutdown >> /dev/null
+    aws ec2 wait instance-terminated --instance-ids "$INSTANCE_ID"
+    rm -f "$KEY_FILE"
+    aws ec2 delete-key-pair --key-name "$KEY_NAME" >> /dev/null
     aws ec2 delete-security-group --group-id "$SG_ID" >> /dev/null
     aws ec2 delete-route --route-table-id "$RT_ID" --destination-cidr-block "$DESTINATION_CIDR" >> /dev/null
-    aws ec2 disassociate-route-table --association-id "$ASSOCIATION_ID"
-    aws ec2 delete-route-table --route-table-id "$RT_ID"
-    aws ec2 detach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
-    aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID"
-    aws ec2 delete-subnet --subnet-id "$SUBNET_ID"
-    aws ec2 delete-vpc --vpc-id "$VPC_ID"
+    aws ec2 disassociate-route-table --association-id "$ASSOCIATION_ID" >> /dev/null
+    aws ec2 delete-route-table --route-table-id "$RT_ID" >> /dev/null
+    aws ec2 detach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID" >> /dev/null
+    aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID" >> /dev/null
+    aws ec2 delete-subnet --subnet-id "$SUBNET_ID" >> /dev/null
+    aws ec2 delete-vpc --vpc-id "$VPC_ID" >> /dev/null
+    echo "All resources have been cleaned up."
+}
+
+git_init(){
+    $GIT_SCRIPT_FILE $KEY_FILE $CONFIG_FILE $PUBLIC_IP $GIT_PRIVATE_KEY_FILE $PROVISION_SCRIPT_FILE
 }
 
 # main function to run the setup
@@ -121,6 +171,11 @@ main(){
     create_igw
     create_rt
     create_sg
+    create_vm
+    git_init
+    echo "Setup complete. You can access the web server at http://$PUBLIC_IP"
+    read -p "Press Enter to terminate the instance and clean up resources..."
+    read -p "Are you sure you want to clean up resources?"
     cleanup
 }
 

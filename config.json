@@ -1,0 +1,25 @@
+{
+    "global": {
+        "project_name": "aws-http-cicd",
+        "region": "us-east-1",
+        "aws_access_key": "YOUR_AWS_ACCESS_KEY",
+        "aws_secret_key": "YOUR_AWS_SECRET_KEY"
+    },
+    "vpc": {
+        "cidr_block": "172.25.1.0/24",
+        "subnet_cidr_block": "172.25.1.0/26",
+        "destination_cidr_block": "0.0.0.0/0"
+    },
+    "ec2": {
+        "ami_id": "ami-0236922087fa98b6e",
+        "instance_type": "t3.micro",
+        "instance_count": 1
+    },
+    "git_repo": {
+        "repo_path": "/opt/git-repo",
+        "user_name": "YOUR_GITHUB_USERNAME",
+        "user_email": "YOUR_GITHUB_EMAIL",
+        "private_key_file": "key.pem",
+        "repo_url": "SSH_URL_OF_YOUR_GITHUB_REPO"
+    }
+}
