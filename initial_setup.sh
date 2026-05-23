@@ -1,4 +1,8 @@
 #!/bin/bash
+
+# passed argement
+ARG=$1
+
 # configuration file for AWS infrastructure setup
 CONFIG_FILE="config.json"
 
@@ -9,6 +13,7 @@ export AWS_DEFAULT_REGION="$(cat "$CONFIG_FILE" | jq -r '.global .region')"
 
 # global variables
 PROJECT_NAME="$(cat "$CONFIG_FILE" | jq -r '.global .project_name')"
+version="1.0"
 
 # VPC configuration variables
 VPC_CIDR="$(cat "$CONFIG_FILE" | jq -r '.vpc .cidr_block')"
@@ -86,6 +91,7 @@ create_igw(){
     aws ec2 attach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
 }
 
+# creating a new Route Table and associating it with the subnet
 create_rt(){
     echo "Creating a new Route Table..."
     RT_ID="$(aws ec2 create-route-table \
@@ -102,6 +108,7 @@ create_rt(){
     --subnet-id $SUBNET_ID --map-public-ip-on-launch >> /dev/null
 }
 
+# creating a new Security Group and adding ingress rules for specified ports
 create_sg(){
     SG_ID=$(aws ec2 create-security-group \
   --group-name "$SG_NAME" \
@@ -119,6 +126,7 @@ create_sg(){
     echo "Key pair created with name: $KEY_NAME and saved to $KEY_FILE"
 }
 
+# creating a new EC2 instance and waiting for it to be in 'running' state
 create_vm(){
     local provision_script=$(<"$PROVISION_SCRIPT_FILE")
     echo "Creating a new EC2 instance..."
@@ -142,29 +150,69 @@ create_vm(){
     echo "Instance Public IP: $PUBLIC_IP"
 }
 
+# function to clean up all resources
 cleanup(){
     echo "Cleaning up resources..."
-    aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --force --skip-os-shutdown >> /dev/null
-    aws ec2 wait instance-terminated --instance-ids "$INSTANCE_ID"
-    rm -f "$KEY_FILE"
-    aws ec2 delete-key-pair --key-name "$KEY_NAME" >> /dev/null
-    aws ec2 delete-security-group --group-id "$SG_ID" >> /dev/null
-    aws ec2 delete-route --route-table-id "$RT_ID" --destination-cidr-block "$DESTINATION_CIDR" >> /dev/null
-    aws ec2 disassociate-route-table --association-id "$ASSOCIATION_ID" >> /dev/null
-    aws ec2 delete-route-table --route-table-id "$RT_ID" >> /dev/null
-    aws ec2 detach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID" >> /dev/null
-    aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID" >> /dev/null
-    aws ec2 delete-subnet --subnet-id "$SUBNET_ID" >> /dev/null
-    aws ec2 delete-vpc --vpc-id "$VPC_ID" >> /dev/null
+    aws ec2 terminate-instances --instance-ids "$(cat setup_log.json | jq -r '.ec2_instance.instance_id')" --force --skip-os-shutdown >> /dev/null
+    aws ec2 wait instance-terminated --instance-ids "$(cat setup_log.json | jq -r '.ec2_instance.instance_id')"
+    rm -f "$(cat setup_log.json | jq -r '.general.key_file')"
+    aws ec2 delete-key-pair --key-name "$(cat setup_log.json | jq -r '.general.key_name')" >> /dev/null
+    aws ec2 delete-security-group --group-id "$(cat setup_log.json | jq -r '.security_group.sg_id')" >> /dev/null
+    aws ec2 delete-route --route-table-id "$(cat setup_log.json | jq -r '.route_table.rt_id')" --destination-cidr-block "$(cat setup_log.json | jq -r '.route_table.destination_cidr_block')" >> /dev/null
+    aws ec2 disassociate-route-table --association-id "$(cat setup_log.json | jq -r '.route_table.association_id')" >> /dev/null
+    aws ec2 delete-route-table --route-table-id "$(cat setup_log.json | jq -r '.route_table.rt_id')" >> /dev/null
+    aws ec2 detach-internet-gateway --internet-gateway-id "$(cat setup_log.json | jq -r '.internet_gateway.igw_id')" --vpc-id "$(cat setup_log.json | jq -r '.vpc.vpc_id')" >> /dev/null
+    aws ec2 delete-internet-gateway --internet-gateway-id "$(cat setup_log.json | jq -r '.internet_gateway.igw_id')" >> /dev/null
+    aws ec2 delete-subnet --subnet-id "$(cat setup_log.json | jq -r '.subnet.subnet_id')" >> /dev/null
+    aws ec2 delete-vpc --vpc-id "$(cat setup_log.json | jq -r '.vpc.vpc_id')" >> /dev/null
     echo "All resources have been cleaned up."
+    rm -f setup_log.json
 }
 
+# function to initialize git configuration and set up the deployment script on the EC2 instance
 git_init(){
     $GIT_SCRIPT_FILE $KEY_FILE $CONFIG_FILE $PUBLIC_IP $GIT_PRIVATE_KEY_FILE $PROVISION_SCRIPT_FILE
 }
 
-# main function to run the setup
-main(){
+log_config(){
+    LOG_CONFIG="{
+        \"project_name\": \"$PROJECT_NAME\",
+        \"general\": {
+            \"key_file\": \"$KEY_FILE\",
+            \"key_name\": \"$KEY_NAME\"
+        },
+        \"vpc\": {
+            \"vpc_id\": \"$VPC_ID\",
+            \"cidr_block\": \"$VPC_CIDR\"
+        },
+        \"subnet\": {
+            \"subnet_id\": \"$SUBNET_ID\",
+            \"cidr_block\": \"$SUBNET_CIDR\"
+        },
+        \"internet_gateway\": {
+            \"igw_id\": \"$IGW_ID\"
+        },
+        \"route_table\": {
+            \"rt_id\": \"$RT_ID\",
+            \"destination_cidr_block\": \"$DESTINATION_CIDR\",
+            \"association_id\": \"$ASSOCIATION_ID\"
+        },
+        \"security_group\": {
+            \"sg_id\": \"$SG_ID\",
+            \"sg_name\": \"$SG_NAME\"
+        },
+        \"ec2_instance\": {
+            \"instance_id\": \"$INSTANCE_ID\",
+            \"public_ip\": \"$PUBLIC_IP\"
+        }
+    }"
+    echo "$LOG_CONFIG" | jq . > "setup_log.json"
+}
+
+# init function to run the setup
+init_func(){
+    echo "AWS HTML CI/CD Pipeline Setup - Version v.$version"
+    echo "Starting initial setup for $PROJECT_NAME..."
     aws_checker
     create_vpc
     create_subnet
@@ -173,10 +221,24 @@ main(){
     create_sg
     create_vm
     git_init
+    log_config
     echo "Setup complete. You can access the web server at http://$PUBLIC_IP"
-    read -p "Press Enter to terminate the instance and clean up resources..."
-    read -p "Are you sure you want to clean up resources?"
-    cleanup
+}
+
+# main function
+main(){
+    case "$ARG" in
+        "init")
+            init_func
+            ;;
+        "cleanup")
+            cleanup
+            ;;
+        *)
+            echo "Usage: $0 {init|cleanup}"
+            exit 1
+            ;;
+    esac
 }
 
 # run the main function
